@@ -1,0 +1,198 @@
+SECURITY
+--------
+
+Please note: The man page now has detailed information about security concerns
+and some tips for setting up rssh securely.  If you haven't read these, please
+do so now.  What follows is mostly a summary of specific security issues which
+have affected rssh since I started developing it.
+
+Nov 27, 2005
+
+Max Vozeler reported a scary problem whereby rssh_chroot_helper can be
+exploited to chroot to arbitrary directories and thereby gain root access.
+The 2.3.0 release of rssh fixes this problem by forcing the chroot helper
+program to re-parse the config file instead of allowing the chroot home to be
+specified on the command line.  Thus users not listed can not use it to chroot
+(or will chroot to the default location, which hopefully the sysadmin has set
+up securely), and users who are listed will be chrooted to the directories
+where they are supposed to go only.
+
+Numerous people reported a problem with the way I used va_start/va_end in
+log.c which causes a segfault on 64-bit Linux platforms.  I don't know if this
+is exploitable, but it's fixed.  Given the previously mentioned root
+compromise, this probably doesn't matter much...  ;-)
+
+Dec 3, 2004
+
+Jason Wies has reported a problem whereby rssh can be bypassed in conjunction
+with scp, rdist, and rsync.  The source of the problem is that these commands
+have command-line options which trigger execution of arbitrary programs.
+
+The 2.2.3 release of rssh fixes this problem, by parsing the command line
+passed to the exec()'d program, making sure it does not contain command line
+options which allow arbitrary execution of programs.
+
+
+Oct 23, 2004
+
+Florian Schilhabel has identified a format string bug which can allow an
+attacker to run arbitrary code from an account configured to use rssh.  In
+general the risk is low, as in most cases the user can only compromise their
+own account.  The risk is mittigated by the fact that before this bug can be
+exploited, the user must log in successfully through ssh.  This means that
+either the user is known, or that the system is already compromised.
+
+However, on some older systems with broken implementations of the setuid()
+family of functions, a root compromise may be possible with certain
+configurations of rssh.  Specifically, if rssh is configured to use a chroot
+jail, it will exec() rssh_chroot_helper, which must be setuid root in order to
+call chroot().  Normally, rssh_chroot_helper calls setuid(getuid()) and drops
+privileges before any of the logging functions are called, making a root
+compromise impossible on most systems.  However, some older systems which
+handle saved UIDs improperly may be vulnerable to a root compromise.  Linux in
+particular is not vulnerable to this, nor should modern POSIX-compliant Unix
+variants be.  POSIX defines that the setuid() system call will set all UIDs
+(UID, saved UID, and effective UID) the specified UID if it is called with
+root privileges.  Therefore in general, a root compromise is not possible, and
+I am not specifically aware of any systems on which one is possible.
+
+The 2.2.2 release of rssh fixes this string format vulnerability.  I have also
+gone over the code to make sure that no other such vulnerabilities exist.  In
+addition to fixing this problem, rssh contains some new code to help identify
+certain problems for debugging problems when rssh fails.  Additional logging
+of error conditions is performed.
+
+May 22, 2004
+
+There is a bug in rssh 2.0 - 2.1.x which allows a user to gather
+information outside of a chrooted jail unintentionally.  It was reported by
+William McCaw, to whom I am thankful.  The latest release of rssh fixes this
+problem, and also improves support for some non-openssh sftp clients.
+Additionally, it extends rssh by allowing cvs, rsync, and rdist.
+
+The cause of the problem identified by Mr. McCaw is that rssh expanded
+command-line arguments prior to entering the chroot jail.  This bug
+DOES NOT allow a user to access any of the files outside the jail, but
+can allow them to discover what files are in a directory which is
+outside the jail, if their credentials on the server would normally
+allow them read/execute access in the specified directory.
+
+For example (from William's bug report), if a user has an account on a
+server machine which restricts them into a jail using rssh, the
+user can use the following command to access the server and see what
+files exist in the /etc directory:
+
+  scp target:/etc/* .
+
+The results of this command will look something like this:
+
+  scp: /etc/DIR_COLORS: No such file or directory
+  scp: /etc/HOSTNAME: No such file or directory
+  scp: /etc/X11: No such file or directory
+  scp: /etc/adjtime: No such file or directory
+  [ ... ]
+  ld.so.cache                                  100%  675     0.0KB/s 00:00
+  ld.so.conf                                   100%    0     0.0KB/s 00:00
+  [ ... ]
+  passwd                                       100%   51     0.0KB/s 00:00
+  [ ... ]
+  scp: /etc/termcap-Linux: No such file or directory
+  scp: /etc/updatedb.conf: No such file or directory
+  scp: /etc/warnquota.conf-sample: No such file or directory
+  scp: /etc/xml: No such file or directory
+
+The files which succeed in copying exist inside the chroot jail, and
+thus should be harmless.  All of the files which produce an error
+message exist in the system's /etc directory, but do not exist inside
+the chroot jail.  The user is placed in the jail before access to any
+of these files is attempted, so again, it is not possible to access
+them.  For many sites, this is not a serious issue.  However if it is
+important at your site that users not be able to know about any files
+which exist outside the chroot jail, then you should upgrade as soon
+as possible.
+
+The 2.2.0 release of rssh fixed the problem in question, but was
+mistakenly released missing some code for parsing per-user options.  
+The 2.2.1 release corrects that problem, and should be the final
+release of rssh.  No further development is planned.
+
+
+Aug 22 2002
+
+  1. Summary
+  2. Details
+
+Summary
+-------
+
+If you are using OpenSSH >= 3.5, you can edit sshd_config to be sure that
+PermitUserEnvironment=no appears in the file and is not commented out, and
+then ignore the rest of this file (well, read it anyway, so you understand the
+issues).  This option did not exist prior to OpenSSH 3.5, so if you're using
+and older version, the rest of this definitely applies to you!
+
+The details of the problem, including a description of how a user might
+exploit the problem, are discussed below. It is currently not completely
+possible to prevent users from circumventing rssh to gain access to the
+restricted system, unless one of two precautions is taken:
+
+    * the rssh binary is compiled statically
+    * efforts are made to prevent the restricted users' environment files from
+      being user-modifiable
+
+In practice, the latter means that an rssh user's home directory must not be
+writable to the user, nor must their .ssh directory (if it exists) be
+writable. It is not sufficient to limit the .ssh directory, as users could use
+sftp to remove or rename the .ssh directory, and create a new one which is
+writable by them. Note that this means they can not own their home directory
+either, as if they do they can use sftp to chmod it. Alternately on Linux
+systems using file systems which support the chattr command, you could chattr
++i the .ssh directory.
+
+For this reason, as of rssh v0.9.3, the binary is compiled statically by
+default. Note that this results in a very large binary (>400k), unlike when
+rssh is compiled and linked dynamically. You can override static compilation
+by removing the -static flag from the CFLAGS macro in Makefile (after
+configure is run); however this is only recommended for sites who basically
+trust their users, or aren't concerned about the possibility of advanced users
+gaining shell access to the host on which access has been restricted via rssh.
+Future versions of rssh will include an option to configure to enable/disable
+static compilation explicitly, so editing the makefile will not be necessary.
+
+Details
+-------
+
+Please note, the flaw is not in rssh itself. The problem is that the OpenSSH
+Project's sshd reads $HOME/.ssh/environment when a user first connects
+(regardless of whether it's via ssh, scp, or sftp), allowing users to set
+variables in their environment. A user could scp a file to that location
+containing a line that sets variables such as LD_LIBRARY_PATH and/or
+LD_PRELOAD, allowing the user to cause binaries exec()'d by the sshd daemon to
+be dynamically linked against libraries of their choosing. This means that
+users can cause rssh itself to execute arbitrary code, and the only thing that
+you can do to prevent this attack is to control users' environments, and make
+absolutely sure they can not write to their .ssh directory.
+
+In OpenSSH 3.4 and before, there is no way to prevent user environment files
+from being sourced.  As of 3.5, sshd has the option PermitUserEnvironment,
+which should be set to no.
+
+Additionally, according to the sshd(8) man page from at least some releases of
+OpenSSH, the commands listed in the $HOME/.ssh/rc file are executed with
+/bin/sh instead of the user's defined shell. This appears not to be the case
+on systems I had available to test on, despite the man page; commands were
+executed using the user's configured shell (rssh), which did not allow the
+execution. However if it is true on your system, then a malicious user may be
+able to circumvent rssh by uploading a file to $HOME/.ssh/rc which will be
+executed by /bin/sh on that system.
+
+I recommend that you upgrade to OpenSSH 3.5 as soon as it becomes available,
+if you wish to use rssh without restricting ownerships and permissions of
+users' home directories, and/or compiling statically.
+
+rssh is a small shell whose purpose is to restrict users to using scp
+or sftp, and also provides the facilities to place users in a chroot
+jail.  It can also be used to lock users out of a system completely.
+William F. McCaw identified a minor security flaw in rssh when used
+with chroot jails.
+
